@@ -486,7 +486,7 @@ begin
 
   frmSaveSnapshots.btnCombinedSelect.visible:=owner.shared.progressiveSnapshot=0;
 
-  frmSaveSnapshots.initialize(owner.shared.snapshotdir, owner.shared.snapshotcount);
+ // frmSaveSnapshots.initialize(owner.shared.snapshotdir, owner.shared.snapshotcount);
 
   frmSaveSnapshots.showmodal;
   owner.shared.canDoSnapshot:=1;

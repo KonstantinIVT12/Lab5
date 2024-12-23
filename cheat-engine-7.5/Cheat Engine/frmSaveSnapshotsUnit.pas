@@ -5,13 +5,58 @@ unit frmSaveSnapshotsUnit;
 interface
 
 uses
-  Classes, SysUtils, FileUtil, Forms, Controls, Graphics, Dialogs, StdCtrls,
-  ExtCtrls, math, LuaCanvas, FPImage, FPCanvas, FPImgCanv, FPReadPNG, FPWritePNG, betterControls;
+  Classes, SysUtils, Forms, Controls, Graphics, Dialogs, StdCtrls, ExtCtrls, Math,
+  LuaCanvas, FPImage, FPCanvas, FPImgCanv, FPReadPNG, FPWritePNG, betterControls;
+
+const
+  TRANSPARENT_COLOR = $FF00FF;
+  MAX_LOADED_SNAPSHOTS = 64;
+  SNAPSHOT_EXTENSION = '.ce3dsnapshot';
 
 resourcestring
   rsSSAreYouSureYouWishToThrowAwayTheseSnapshots = 'Are you sure you wish to throw away these snapshots?';
 
 type
+  TSnapshot = class
+  private
+    FFilename: string;
+    FPic: TBitmap;
+    FSelected: Boolean;
+    FXPos: Integer;
+    FWidth: Integer;
+  public
+    constructor Create(const Filename: string);
+    destructor Destroy; override;
+
+    procedure Load;
+    procedure Unload;
+
+    property Filename: string read FFilename;
+    property Pic: TBitmap read FPic;
+    property Selected: Boolean read FSelected write FSelected;
+    property XPos: Integer read FXPos write FXPos;
+    property Width: Integer read FWidth write FWidth;
+  end;
+
+  TSnapshots = class
+  private
+    FList: TList;
+    FLoadedCount: Integer;
+
+    procedure Cleanup(index: Integer);
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    function Add(const Filename: string): TSnapshot;
+    procedure Clear;
+    function GetItem(Index: Integer): TSnapshot;
+    procedure SelectAll;
+    procedure DeselectAll;
+
+    property LoadedCount: Integer read FLoadedCount;
+    property Items[Index: Integer]: TSnapshot read GetItem; default;
+  end;
 
   { TfrmSaveSnapshots }
 
@@ -27,40 +72,27 @@ type
     Panel2: TPanel;
     SaveDialog1: TSaveDialog;
     ScrollBar1: TScrollBar;
-    procedure btnCancelClick(Sender: TObject);
+
     procedure btnSaveClick(Sender: TObject);
     procedure btnDoneClick(Sender: TObject);
-    procedure btnCombinedSelectClick(Sender: TObject);
+    //procedure btnCombinedSelectClick(Sender: TObject);
     procedure FormCloseQuery(Sender: TObject; var CanClose: boolean);
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
-    procedure FormShow(Sender: TObject);
     procedure lblDeselectAllClick(Sender: TObject);
     procedure lblSelectAllClick(Sender: TObject);
     procedure PaintBox1MouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
     procedure PaintBox1Paint(Sender: TObject);
-    procedure PaintBox1Resize(Sender: TObject);
     procedure Panel2Resize(Sender: TObject);
     procedure ScrollBar1Change(Sender: TObject);
   private
-    { private declarations }
-    snapshots: array of record
-      filename: string;
-      pic: TBitmap;
-      selected: boolean;
-      xpos: integer;
-      width: integer;
-    end;
-    fsaved: tstringlist;
+    Snapshots: TSnapshots;
+    FSaved: TStringList;
 
-    loaded: integer;
-    procedure combinedselect(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: integer);
-    procedure loadSnapshot(index: integer);
+    procedure InitializeSnapshots(const Path: string; Max: Integer);
   public
-    { public declarations }
-    procedure initialize(path: string; max: integer);
-    property saved: TStringlist read fsaved;
+    property Saved: TStringList read FSaved;
   end;
 
 var
@@ -70,122 +102,258 @@ implementation
 
 {$R *.lfm}
 
-{ TfrmSaveSnapshots }
+{ TSnapshot }
 
-procedure TfrmSaveSnapshots.loadSnapshot(index: integer);
-var
-  s: Tfilestream;
-  picturesize: integer;
-  error: string;
-  i: integer;
-  fpi: TFPMemoryImage;
-  fpr: TFPReaderPNG;
-  fpw: TFPWriterPNG;
-
-
-  c: TFPCustomCanvas;
-
-  format: integer;
-
-
+constructor TSnapshot.Create(const Filename: string);
 begin
+  FFilename := Filename;
+  FPic := nil;
+  FSelected := False;
+end;
+
+destructor TSnapshot.Destroy;
+begin
+  if Assigned(FPic) then
+    FreeAndNil(FPic);
+  inherited Destroy;
+end;
+
+procedure TSnapshot.Load;
+var
+  S: TFileStream;
+  PictureSize, Format: Integer;
+  FPImage: TFPMemoryImage;
+  FPReader: TFPReaderPNG;
+  Canvas: TFPCustomCanvas;
+begin
+  if Assigned(FPic) then Exit;
+
+  S := TFileStream.Create(FFilename, fmOpenRead);
   try
+    S.Position := 4;
+    S.ReadBuffer(Format, SizeOf(Format));
+    S.ReadBuffer(PictureSize, SizeOf(PictureSize));
 
-
-
-    if loaded>64 then //time to cleanup
+    if Format = 0 then
     begin
-      for i:=index-16 downto 0 do  //allow a few in front
-        if snapshots[i].pic<>nil then
-        begin
-          freeandnil(snapshots[i].pic);
-          dec(loaded);
-        end;
-
-      for i:=index+48 to length(snapshots)-1 do
-        if snapshots[i].pic<>nil then
-        begin
-          freeandnil(snapshots[i].pic);
-          dec(loaded);
-        end;
-
-    end;
-
-    if snapshots[index].pic=nil then
+      FPic := TBitmap.Create;
+      FPic.LoadFromStream(S, PictureSize);
+    end
+    else if Format = 3 then
     begin
-      s:=tfilestream.Create(snapshots[index].filename, fmOpenRead);
+      FPImage := TFPMemoryImage.Create(0, 0);
+      FPReader := TFPReaderPNG.Create;
       try
-        s.position:=4; //to the format type
-        s.readbuffer(format, sizeof(format));
-        s.ReadBuffer(picturesize, sizeof(picturesize));
+        FPImage.LoadFromStream(S, FPReader);
+        Canvas := TFPImageCanvas.Create(FPImage);
 
-        if format=0 then
-        begin
-          //bmp
-          snapshots[index].pic:=tbitmap.Create;
-          snapshots[index].pic.LoadFromStream(s, picturesize);
-        end
-        else
-        if format=3 then //png
-        begin
-
-          fpi:=TFPMemoryImage.Create(0,0);
-          fpr:=TFPReaderPNG.create;
-          fpi.LoadFromStream(s, fpr);
-
-
-          c:=TFPImageCanvas.create(fpi);
-
-          snapshots[index].pic:=tbitmap.Create;
-          snapshots[index].pic.Width:=fpi.Width;
-          snapshots[index].pic.Height:=fpi.Height;
-          TFPCustomCanvas(snapshots[index].pic.Canvas).CopyRect(0,0, c, rect(0,0,fpi.width, fpi.height));
-
-          c.free;
-          fpr.free;
-          fpi.free;
-        end;
-
+        FPic := TBitmap.Create;
+        FPic.Width := FPImage.Width;
+        FPic.Height := FPImage.Height;
+        TFPCustomCanvas(FPic.Canvas).CopyRect(0, 0, Canvas, Rect(0, 0, FPImage.Width, FPImage.Height));
       finally
-        s.free;
+        Canvas.Free;
+        FPReader.Free;
+        FPImage.Free;
       end;
-
-      inc(loaded);
     end;
-
-  except
-    //this is called from onpaint. Exceptions in onpaint crash apps
-{    on e: exception do
-    begin
-      error:=e.Message;
-      ShowMessage(error);
-    end;}
+  finally
+    S.Free;
   end;
 end;
 
-procedure TfrmSaveSnapshots.initialize(path: string; max: integer);
-var i: integer;
+procedure TSnapshot.Unload;
 begin
-  try
-    scrollbar1.position:=0;
-    scrollbar1.Max:=max-1;
-    setlength(snapshots, max);
+  if Assigned(FPic) then
+    FreeAndNil(FPic);
+end;
 
-    for i:=0 to max-1 do
+{ TSnapshots }
+
+constructor TSnapshots.Create;
+begin
+  FList := TList.Create;
+  FLoadedCount := 0;
+end;
+
+destructor TSnapshots.Destroy;
+begin
+  Clear;
+  FList.Free;
+  inherited Destroy;
+end;
+
+procedure TSnapshots.Cleanup(index: Integer);
+var
+  I: Integer;
+begin
+  if FLoadedCount > MAX_LOADED_SNAPSHOTS then
+  begin
+    for I := Index - 16 downto 0 do
+      if Items[I].Pic <> nil then
+      begin
+        Items[I].Unload;
+        Dec(FLoadedCount);
+      end;
+
+    for I := Index + 48 to FList.Count - 1 do
+      if Items[I].Pic <> nil then
+      begin
+        Items[I].Unload;
+        Dec(FLoadedCount);
+      end;
+  end;
+end;
+
+function TSnapshots.Add(const Filename: string): TSnapshot;
+var
+  Snapshot: TSnapshot;
+begin
+  Snapshot := TSnapshot.Create(Filename);
+  FList.Add(Snapshot);
+  Result := Snapshot;
+end;
+
+procedure TSnapshots.Clear;
+var
+  I: Integer;
+begin
+  for I := 0 to FList.Count - 1 do
+    TSnapshot(FList[I]).Free;
+  FList.Clear;
+end;
+
+function TSnapshots.GetItem(Index: Integer): TSnapshot;
+begin
+  Result := TSnapshot(FList[Index]);
+end;
+
+procedure TSnapshots.SelectAll;
+var
+  I: Integer;
+begin
+  for I := 0 to FList.Count - 1 do
+    Items[I].Selected := True;
+end;
+
+procedure TSnapshots.DeselectAll;
+var
+  I: Integer;
+begin
+  for I := 0 to FList.Count - 1 do
+    Items[I].Selected := False;
+end;
+
+{ TfrmSaveSnapshots }
+
+procedure TfrmSaveSnapshots.InitializeSnapshots(const Path: string; Max: Integer);
+var
+  I: Integer;
+begin
+  ScrollBar1.Position := 0;
+  ScrollBar1.Max := Max - 1;
+
+  Snapshots.Clear;
+  for I := 0 to Max - 1 do
+    Snapshots.Add(Format('%ssnapshot%d%s', [Path, I + 1, SNAPSHOT_EXTENSION]));
+end;
+
+procedure TfrmSaveSnapshots.btnSaveClick(Sender: TObject);
+var
+  I, Count: Integer;
+  FilePath: string;
+begin
+  if SaveDialog1.Execute then
+  begin
+    FSaved.Clear;
+    Count := 1;
+    for I := 0 to Snapshots.FList.Count - 1 do
+      if Snapshots[I].Selected then
+      begin
+        FilePath := ChangeFileExt(SaveDialog1.FileName, Format('(%d)%s', [Count, ExtractFileExt(SaveDialog1.FileName)]));
+        //CopyFile(Snapshots[I].Filename, FilePath, True);
+        FSaved.Add(FilePath);
+        Inc(Count);
+      end;
+
+    Snapshots.DeselectAll;
+    PaintBox1.Repaint;
+  end;
+end;
+
+procedure TfrmSaveSnapshots.btnDoneClick(Sender: TObject);
+begin
+  if FSaved.Count > 0 then
+    btnSaveClick(Sender);
+  Close;
+end;
+
+procedure TfrmSaveSnapshots.lblDeselectAllClick(Sender: TObject);
+begin
+  Snapshots.DeselectAll;
+  PaintBox1.Repaint;
+end;
+
+procedure TfrmSaveSnapshots.lblSelectAllClick(Sender: TObject);
+begin
+  Snapshots.SelectAll;
+  PaintBox1.Repaint;
+end;
+
+procedure TfrmSaveSnapshots.PaintBox1MouseDown(Sender: TObject;
+  Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+var
+  I: Integer;
+begin
+  for I := ScrollBar1.Position to Snapshots.FList.Count - 1 do
+    if InRange(X, Snapshots[I].XPos, Snapshots[I].XPos + Snapshots[I].Width) then
     begin
-      snapshots[i].filename:=path+'snapshot'+inttostr(i+1)+'.ce3dsnapshot';
-      snapshots[i].pic:=nil;
-      snapshots[i].selected:=false;
+      Snapshots[I].Selected := not Snapshots[I].Selected;
+      Break;
     end;
-  except
-    setlength(snapshots, 0);
+  PaintBox1.Repaint;
+end;
+
+procedure TfrmSaveSnapshots.PaintBox1Paint(Sender: TObject);
+var
+  I, XPos, CurrentWidth, H: Integer;
+  AspectRatio: Single;
+begin
+  PaintBox1.Canvas.Clear;
+  XPos := 0;
+  H := PaintBox1.Height;
+
+  for I := ScrollBar1.Position to Snapshots.FList.Count - 1 do
+  begin
+    Snapshots[I].Load;
+    AspectRatio := Snapshots[I].Pic.Width / Snapshots[I].Pic.Height;
+    CurrentWidth := Ceil(H * AspectRatio);
+
+    PaintBox1.Canvas.CopyRect(Rect(XPos, 0, XPos + CurrentWidth, H),
+      Snapshots[I].Pic.Canvas, Rect(0, 0, Snapshots[I].Pic.Width, Snapshots[I].Pic.Height));
+
+    Snapshots[I].XPos := XPos;
+    Snapshots[I].Width := CurrentWidth;
+
+    if Snapshots[I].Selected then
+    begin
+      PaintBox1.Canvas.Pen.Width := 3;
+      PaintBox1.Canvas.Pen.Color := clAqua;
+      PaintBox1.Canvas.Brush.Style := bsClear;
+      PaintBox1.Canvas.Rectangle(Rect(XPos, 0, XPos + CurrentWidth, H));
+      PaintBox1.Canvas.Brush.Style := bsSolid;
+    end;
+
+    Inc(XPos, CurrentWidth + 1);
+    if XPos > PaintBox1.Width then
+      Exit;
   end;
 end;
 
 procedure TfrmSaveSnapshots.Panel2Resize(Sender: TObject);
 begin
-  btnsave.left:=panel2.Width div 2-btnsave.width div 2;
-  btnDone.left:=panel2.Width div 2-btnDone.width div 2;
+  btnSave.Left := Panel2.Width div 2 - btnSave.Width div 2;
+  btnDone.Left := Panel2.Width div 2 - btnDone.Width div 2;
 end;
 
 procedure TfrmSaveSnapshots.ScrollBar1Change(Sender: TObject);
@@ -193,302 +361,25 @@ begin
   PaintBox1.Repaint;
 end;
 
-
-
 procedure TfrmSaveSnapshots.FormCreate(Sender: TObject);
 begin
-  DoubleBuffered:=true;
-  Panel1.DoubleBuffered:=true;
-  fsaved:=TStringList.create;
+  Snapshots := TSnapshots.Create;
+  FSaved := TStringList.Create;
 end;
 
 procedure TfrmSaveSnapshots.FormDestroy(Sender: TObject);
-var i: integer;
 begin
-  if fsaved<>nil then
-    freeandnil(fsaved);
-
-  for i:=0 to length(snapshots)-1 do
-  begin
-    if snapshots[i].pic<>nil then
-      FreeAndNil(snapshots[i].pic);
-  end;
+  Snapshots.Free;
+  FSaved.Free;
 end;
 
-procedure TfrmSaveSnapshots.FormShow(Sender: TObject);
+procedure TfrmSaveSnapshots.FormCloseQuery(Sender: TObject; var CanClose: boolean);
 begin
-  lblSelectAll.Font.height:=GetFontData(font.handle).height;
-  lblDeselectAll.Font.height:=GetFontData(font.handle).height;
-end;
-
-procedure TfrmSaveSnapshots.lblDeselectAllClick(Sender: TObject);
-var i: integer;
-begin
-  for i:=0 to length(snapshots)-1 do
-    snapshots[i].selected:=false;
-
-  paintbox1.Repaint;
-end;
-
-procedure TfrmSaveSnapshots.btnCancelClick(Sender: TObject);
-begin
-
-end;
-
-procedure TfrmSaveSnapshots.btnSaveClick(Sender: TObject);
-var i: integer;
-  v: string;
-  j: integer;
-
-  ext: string;
-  f: string;
-
-
-  fn: string;
-begin
-
-
-
-  if savedialog1.execute then
-  begin
-    //copy all selected snapshots to this folder
-
-    ext:=ExtractFileExt(savedialog1.filename);
-    //f:=ExtractFileNameWithoutExt(savedialog1.filename);
-
-
-
-    j:=1;
-    for i:=0 to length(snapshots)-1 do
-      if snapshots[i].selected then
-      begin
-        if j=1 then
-          fn:=f+ext
-        else
-          fn:=f+inttostr(j)+ext;
-
-        CopyFile(snapshots[i].filename, fn, true);
-        fsaved.Add(fn);
-        inc(j);
-
-      end;
-
-    lblDeselectAll.OnClick(lblSelectAll);
-
-  end;
-
-end;
-
-procedure TfrmSaveSnapshots.btnDoneClick(Sender: TObject);
-var i,j: integer;
-begin
-  j:=0;
-  for i:=0 to length(snapshots)-1 do
-    if snapshots[i].selected then
-      inc(j);
-
-  if j>0 then //something is selected
-    btnSave.click;
-
-  close;
-end;
-
-
-procedure TfrmSaveSnapshots.combinedselect(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: integer);
-var img: timage;
-  sx, sy: integer;
-  i: integer;
-
-
-begin
-  img:=TImage(sender);
-  sx:=trunc((img.Picture.Width/img.Width)*x);
-  sy:=trunc((img.Picture.Height/img.Height)*y);
-
-  //find snapshots that have a pixel not $ff00ff at sx,sy
-
-  for i:=0 to length(snapshots)-1 do
-  begin
-    loadSnapshot(i);
-
-    if snapshots[i].pic.canvas.Pixels[sx,sy]<>$ff00ff then
-      snapshots[i].selected:=true;
-  end;
-
-
-  TCustomForm(img.Parent).close;
-
-  PaintBox1.repaint;
-end;
-
-procedure TfrmSaveSnapshots.btnCombinedSelectClick(Sender: TObject);
-var
-  i: integer;
-  b: TBitmap;
-
-  b2: tbitmap;
-  f: TCustomForm;
-
-  img: timage;
-begin
-  //create a "combined" view the user can use to select which pixels to pick
-
-  loadSnapshot(0);
-
-  b:=tbitmap.create;
-  b.Width:=snapshots[0].pic.Width;
-  b.Height:=snapshots[0].pic.Height;
-
-
-
-
-  for i:=0 to length(snapshots)-1 do
-  begin
-    loadSnapshot(i);
-    //for some reason I first need to convert it to a BMP before transparancy take an effect
-
-    b2:=tbitmap.create;
-    b2.width:=snapshots[i].pic.width;
-    b2.Height:=snapshots[i].pic.Height;
-
-    b2.Canvas.Draw(0,0,snapshots[i].pic);
-
-
-    b2.TransparentColor:=$ff00ff;
-    b2.Transparent:=true;
-
-    b.Canvas.Draw(0,0,b2);
-
-    b2.free;
-  end;
-
-
-  f:=TCustomForm.create(self);
-  img:=TImage.create(f);
-  img.Picture.Bitmap:=b;
-  img.parent:=f;
-  img.align:=alClient;
-  img.Stretch:=true;
-  img.OnMouseDown:=combinedselect;
-
-  f.ClientWidth:=b.width;
-  f.ClientHeight:=b.Height;
-  f.BorderIcons:=[biSystemMenu];
-  f.position:=poScreenCenter;
-  f.showmodal;
-
-  img.free;
-  f.free;
-  b.free;
-
-
-end;
-
-procedure TfrmSaveSnapshots.FormCloseQuery(Sender: TObject;
-  var CanClose: boolean);
-begin
-  if (saved.count>0) or (MessageDlg(rsSSAreYouSureYouWishToThrowAwayTheseSnapshots, mtConfirmation, [mbyes, mbno], 0)=mryes) then
-    CanClose:=true
+  if (FSaved.Count > 0) or
+    (MessageDlg(rsSSAreYouSureYouWishToThrowAwayTheseSnapshots, mtConfirmation, [mbYes, mbNo], 0) = mrYes) then
+    CanClose := True
   else
-    canclose:=false;
-end;
-
-procedure TfrmSaveSnapshots.lblSelectAllClick(Sender: TObject);
-var i: integer;
-begin
-  for i:=0 to length(snapshots)-1 do
-    snapshots[i].selected:=true;
-
-  paintbox1.Repaint;
-end;
-
-procedure TfrmSaveSnapshots.PaintBox1MouseDown(Sender: TObject;
-  Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
-var i: integer;
-begin
-  for i:=scrollbar1.Position to length(snapshots)-1 do
-    if InRange(x, snapshots[i].xpos, snapshots[i].xpos+snapshots[i].width) then
-    begin
-      snapshots[i].selected:=not snapshots[i].selected;
-      break;
-    end;
-
-  PaintBox1.repaint;
-end;
-
-procedure TfrmSaveSnapshots.PaintBox1Paint(Sender: TObject);
-var i,j: integer;
-  startpos: integer;
-  xpos: integer;
-
-  aspectratio: single;
-  currentw: integer;
-
-  h: integer;
-begin
-  //load and draw the pictures
-  paintbox1.Canvas.Clear;
-
-  startpos:=scrollbar1.Position;
-
-  if startpos>=length(snapshots) then
-    exit;
-
-  xpos:=0;
-
-  //
-  if snapshots[startpos].pic=nil then
-    loadSnapshot(startpos);
-
-
-
-
-  h:=paintbox1.Height;
-
-
-
-
-  for i:=startpos to length(snapshots)-1 do
-  begin
-    if snapshots[i].pic=nil then
-      loadSnapshot(i);
-
-    if snapshots[i].pic=nil then continue;
-
-    aspectratio:=snapshots[i].pic.Width/snapshots[i].pic.Height;
-
-
-
-    currentw:=ceil(h*aspectratio);
-
-
-
-    paintbox1.Canvas.CopyRect(rect(xpos, 0, xpos+currentw, h), snapshots[i].pic.Canvas, rect(0,0,snapshots[i].pic.width, snapshots[i].pic.height));
-
-    snapshots[i].xpos:=xpos;
-    snapshots[i].width:=currentw;
-
-    if snapshots[i].selected then
-    begin
-      paintbox1.Canvas.Pen.Width:=3;
-      paintbox1.canvas.pen.Color:=clAqua;
-      paintbox1.canvas.Brush.Style:=bsClear;
-      paintbox1.Canvas.Rectangle(rect(xpos, 0, xpos+currentw, h));
-      paintbox1.canvas.Brush.Style:=bsSolid;
-
-    end;
-
-    inc(xpos, currentw+1);
-    if xpos>paintbox1.Width then
-      exit; //done
-  end;
-
-end;
-
-procedure TfrmSaveSnapshots.PaintBox1Resize(Sender: TObject);
-begin
-
-
+    CanClose := False;
 end;
 
 end.
